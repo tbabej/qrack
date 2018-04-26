@@ -8,4 +8,4 @@ install:
 script:
   - mkdir _build && cd _build && cmake -DENABLE_CODECOVERAGE=ON -DUSE_OPENCL=OFF .. && make -j 8 unittest && ./unittest test_m
 after_success:
-  - cd _build && coveralls --gcov-options '\-lp'
+  - pwd && coveralls --gcov-options '\-lp'
