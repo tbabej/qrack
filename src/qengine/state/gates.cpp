@@ -12,6 +12,8 @@
 
 #include "qengine_cpu.hpp"
 
+#include "common/par_for.hpp"
+
 namespace Qrack {
 
 /// Measurement gate
@@ -40,13 +42,13 @@ bool QEngineCPU::M(bitLenInt qubit)
 
         nrm = Complex16(cosine, sine) / nrmlzr;
 
-        par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-            if ((lcv & qPowers) == 0) {
-                stateVec[lcv] = Complex16(0.0, 0.0);
+        PAR_FOR(0, maxQPower) {
+            if ((idx & qPowers) == 0) {
+                stateVec[idx] = Complex16(0.0, 0.0);
             } else {
-                stateVec[lcv] = nrm * stateVec[lcv];
+                stateVec[idx] = nrm * stateVec[idx];
             }
-        });
+        } PAR_FOR_END;
     } else {
         if (oneChance < 1.0) {
             nrmlzr = sqrt(1.0 - oneChance);
@@ -54,13 +56,13 @@ bool QEngineCPU::M(bitLenInt qubit)
 
         nrm = Complex16(cosine, sine) / nrmlzr;
 
-        par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-            if ((lcv & qPowers) == 0) {
-                stateVec[lcv] = nrm * stateVec[lcv];
+        PAR_FOR(0, maxQPower) {
+            if ((idx & qPowers) == 0) {
+                stateVec[idx] = nrm * stateVec[idx];
             } else {
-                stateVec[lcv] = Complex16(0.0, 0.0);
+                stateVec[idx] = Complex16(0.0, 0.0);
             }
-        });
+        } PAR_FOR_END;
     }
 
     UpdateRunningNorm();
@@ -79,8 +81,8 @@ void QEngineCPU::X(bitLenInt start, bitLenInt length)
     }
 
     // As a fundamental gate, the register-wise X could proceed like so:
-    // for (bitLenInt lcv = 0; lcv < length; lcv++) {
-    //    X(start + lcv);
+    // for (bitLenInt idx = 0; idx < length; idx++) {
+    //    X(start + idx);
     //}
 
     // Basically ALL register-wise gates proceed by essentially the same
@@ -102,10 +104,10 @@ void QEngineCPU::X(bitLenInt start, bitLenInt length)
     // the parallel for loop. Some skip certain permutations in order to
     // optimize. Some take a new permutation state vector for output, and some
     // just transform the permutation state vector in place.
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-        // Set nStateVec, indexed by the loop control variable (lcv) with
+    PAR_FOR(0, maxQPower) {
+        // Set nStateVec, indexed by the loop control variable (idx) with
         // the X'ed bits inverted, with the value of stateVec indexed by
-        // lcv.
+        // idx.
 
         // This is the body of the parallel "for" loop. We iterate over
         // permutations of bits.  We're going to transform from input
@@ -114,7 +116,7 @@ void QEngineCPU::X(bitLenInt start, bitLenInt length)
         // permutation.  These are the bits that aren't involved in the
         // operation.
 
-        // bitCapInt otherRes = (lcv & otherMask);
+        // bitCapInt otherRes = (idx & otherMask);
 
         // These are the bits in the register that is being operated on. In
         // all permutation states, the bits acted on by the gate should be
@@ -122,15 +124,15 @@ void QEngineCPU::X(bitLenInt start, bitLenInt length)
         // permutation to output permutation. Since this is an X gate, we
         // take the involved bits and bitwise NOT them.
 
-        // bitCapInt inOutRes = ((~lcv) & inOutMask);
+        // bitCapInt inOutRes = ((~idx) & inOutMask);
 
         // Now, we just transfer the untransformed input state's phase and
         // probability to the transformed output state.
 
-        // nStateVec[inOutRes | otherRes] = stateVec[lcv];
+        // nStateVec[inOutRes | otherRes] = stateVec[idx];
 
         // (We can do this all in one line:)
-        nStateVec[(lcv & otherMask) | ((~lcv) & inOutMask)] = stateVec[lcv];
+        nStateVec[(idx & otherMask) | ((~idx) & inOutMask)] = stateVec[idx];
 
         // For other operations, like the quantum equivalent of a logical
         // "AND," we might have two input registers and one output
@@ -139,7 +141,7 @@ void QEngineCPU::X(bitLenInt start, bitLenInt length)
         // this logical result into the output register with another bit
         // mask, for every possible permutation state. Basically all the
         // register-wise operations in Qrack proceed this same way.
-    });
+    } PAR_FOR_END;
     // We replace our old permutation state vector with the new one we just
     // filled, at the end.
     ResetStateVec(nStateVec);
@@ -155,12 +157,12 @@ void QEngineCPU::CNOT(bitLenInt start1, bitLenInt start2, bitLenInt length)
 
     Complex16 *nStateVec = AllocStateVec(maxQPower);
 
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-        bitCapInt otherRes = (lcv & otherMask);
-        bitCapInt reg1Res = lcv & reg1Mask;
-        bitCapInt reg2Res = ((reg1Res >> start1) ^ ((lcv & reg2Mask) >> start2)) << start2;
-        nStateVec[reg1Res | reg2Res | otherRes] = stateVec[lcv];
-    });
+    PAR_FOR(0, maxQPower) {
+        bitCapInt otherRes = (idx & otherMask);
+        bitCapInt reg1Res = idx & reg1Mask;
+        bitCapInt reg2Res = ((reg1Res >> start1) ^ ((idx & reg2Mask) >> start2)) << start2;
+        nStateVec[reg1Res | reg2Res | otherRes] = stateVec[idx];
+    } PAR_FOR_END;
     // We replace our old permutation state vector with the new one we just filled, at the end.
     ResetStateVec(nStateVec);
 }
@@ -175,12 +177,12 @@ void QEngineCPU::AntiCNOT(bitLenInt start1, bitLenInt start2, bitLenInt length)
 
     Complex16 *nStateVec = AllocStateVec(maxQPower);
 
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-        bitCapInt otherRes = (lcv & otherMask);
-        bitCapInt reg1Res = lcv & reg1Mask;
-        bitCapInt reg2Res = ((((~reg1Res) & reg1Mask) >> start1) ^ ((lcv & reg2Mask) >> start2)) << start2;
-        nStateVec[reg1Res | reg2Res | otherRes] = stateVec[lcv];
-    });
+    PAR_FOR(0, maxQPower) {
+        bitCapInt otherRes = (idx & otherMask);
+        bitCapInt reg1Res = idx & reg1Mask;
+        bitCapInt reg2Res = ((((~reg1Res) & reg1Mask) >> start1) ^ ((idx & reg2Mask) >> start2)) << start2;
+        nStateVec[reg1Res | reg2Res | otherRes] = stateVec[idx];
+    } PAR_FOR_END;
     // We replace our old permutation state vector with the new one we just filled, at the end.
     ResetStateVec(nStateVec);
 }
@@ -196,13 +198,13 @@ void QEngineCPU::CCNOT(bitLenInt control1, bitLenInt control2, bitLenInt target,
 
     Complex16 *nStateVec = AllocStateVec(maxQPower);
 
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-        bitCapInt otherRes = (lcv & otherMask);
-        bitCapInt reg1Res = lcv & reg1Mask;
-        bitCapInt reg2Res = lcv & reg2Mask;
-        bitCapInt reg3Res = (((reg1Res >> control1) & (reg2Res >> control2)) ^ ((lcv & reg3Mask) >> target)) << target;
-        nStateVec[reg1Res | reg2Res | reg3Res | otherRes] = stateVec[lcv];
-    });
+    PAR_FOR(0, maxQPower) {
+        bitCapInt otherRes = (idx & otherMask);
+        bitCapInt reg1Res = idx & reg1Mask;
+        bitCapInt reg2Res = idx & reg2Mask;
+        bitCapInt reg3Res = (((reg1Res >> control1) & (reg2Res >> control2)) ^ ((idx & reg3Mask) >> target)) << target;
+        nStateVec[reg1Res | reg2Res | reg3Res | otherRes] = stateVec[idx];
+    } PAR_FOR_END;
     // We replace our old permutation state vector with the new one we just filled, at the end.
     ResetStateVec(nStateVec);
 }
@@ -218,13 +220,13 @@ void QEngineCPU::AntiCCNOT(bitLenInt control1, bitLenInt control2, bitLenInt tar
 
     Complex16* nStateVec = AllocStateVec(maxQPower);
 
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-        bitCapInt otherRes = (lcv & otherMask);
-        bitCapInt reg1Res = lcv & reg1Mask;
-        bitCapInt reg2Res = lcv & reg2Mask;
-        bitCapInt reg3Res = (((((~reg1Res) & reg1Mask) >> control1) & (((~reg2Res) & reg2Mask) >> control2)) ^ ((lcv & reg3Mask) >> target)) << target;
-        nStateVec[reg1Res | reg2Res | reg3Res | otherRes] = stateVec[lcv];
-    });
+    PAR_FOR(0, maxQPower) {
+        bitCapInt otherRes = (idx & otherMask);
+        bitCapInt reg1Res = idx & reg1Mask;
+        bitCapInt reg2Res = idx & reg2Mask;
+        bitCapInt reg3Res = (((((~reg1Res) & reg1Mask) >> control1) & (((~reg2Res) & reg2Mask) >> control2)) ^ ((idx & reg3Mask) >> target)) << target;
+        nStateVec[reg1Res | reg2Res | reg3Res | otherRes] = stateVec[idx];
+    } PAR_FOR_END;
     // We replace our old permutation state vector with the new one we just filled, at the end.
     ResetStateVec(nStateVec);
 }
@@ -244,12 +246,12 @@ void QEngineCPU::Swap(bitLenInt start1, bitLenInt start2, bitLenInt length)
 
     Complex16* nStateVec = AllocStateVec(maxQPower);
 
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-        bitCapInt otherRes = (lcv & otherMask);
-        bitCapInt reg1Res = ((lcv & reg1Mask) >> start1) << start2;
-        bitCapInt reg2Res = ((lcv & reg2Mask) >> start2) << start1;
-        nStateVec[reg1Res | reg2Res | otherRes] = stateVec[lcv];
-    });
+    PAR_FOR(0, maxQPower) {
+        bitCapInt otherRes = (idx & otherMask);
+        bitCapInt reg1Res = ((idx & reg1Mask) >> start1) << start2;
+        bitCapInt reg2Res = ((idx & reg2Mask) >> start2) << start1;
+        nStateVec[reg1Res | reg2Res | otherRes] = stateVec[idx];
+    } PAR_FOR_END;
     // We replace our old permutation state vector with the new one we just filled, at the end.
     ResetStateVec(nStateVec);
 }
@@ -257,7 +259,9 @@ void QEngineCPU::Swap(bitLenInt start1, bitLenInt start2, bitLenInt length)
 /// Phase flip always - equivalent to Z X Z X on any bit in the QEngineCPU
 void QEngineCPU::PhaseFlip()
 {
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) { stateVec[lcv] = -stateVec[lcv]; });
+    PAR_FOR(0, maxQPower) {
+        stateVec[idx] = -stateVec[idx];
+    } PAR_FOR_END;
 }
 
 }

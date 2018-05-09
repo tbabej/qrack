@@ -21,7 +21,7 @@ namespace Qrack {
 
 class ParallelFor 
 {
-private:
+protected:
     int32_t numCores;
 
 public:

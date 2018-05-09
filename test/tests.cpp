@@ -21,6 +21,8 @@
 
 #include "tests.hpp"
 
+#include "common/par_for.hpp"
+
 using namespace Qrack;
 
 #define EPSILON 0.001
@@ -141,30 +143,35 @@ TEST_CASE("test_complex")
 
 }
 
+#define par_for qengine->par_for
+#define par_for_skip qengine->par_for_skip
+#define par_for_mask qengine->par_for_mask
+
 TEST_CASE("test_qengine_cpu_par_for")
 {
     QEngineCPUPtr qengine = std::make_shared<QEngineCPU>(1, 0);
 
-    int NUM_ENTRIES = 2000;
+    unsigned int NUM_ENTRIES = 2000;
     std::atomic_bool hit[NUM_ENTRIES];
     std::atomic_int calls;
+    int numCores = qengine->GetConcurrencyLevel();
 
     calls.store(0);
 
-    for (int i = 0; i < NUM_ENTRIES; i++) {
+    for (unsigned int i = 0; i < NUM_ENTRIES; i++) {
         hit[i].store(false);
     }
 
-    qengine->par_for(0, NUM_ENTRIES, [&](const bitCapInt lcv, const int cpu) {
+    PAR_FOR(0, NUM_ENTRIES) {
         bool old = true;
-        old = hit[lcv].exchange(old);
+        old = hit[idx].exchange(old);
         REQUIRE(old == false);
         calls++;
-    });
+    } PAR_FOR_END;
 
     REQUIRE(calls.load() == NUM_ENTRIES);
 
-    for (int i = 0; i < NUM_ENTRIES; i++) {
+    for (unsigned int i = 0; i < NUM_ENTRIES; i++) {
         REQUIRE(hit[i].load() == true);
     }
 }
@@ -172,8 +179,9 @@ TEST_CASE("test_qengine_cpu_par_for")
 TEST_CASE("test_qengine_cpu_par_for_skip")
 {
     QEngineCPUPtr qengine = std::make_shared<QEngineCPU>(1, 0);
+    int numCores = qengine->GetConcurrencyLevel();
 
-    int NUM_ENTRIES = 2000;
+    unsigned int NUM_ENTRIES = 2000;
     int NUM_CALLS = 1000;
 
     std::atomic_bool hit[NUM_ENTRIES];
@@ -183,18 +191,18 @@ TEST_CASE("test_qengine_cpu_par_for_skip")
 
     int skipBit = 0x4; // Skip 0b100 when counting upwards.
 
-    for (int i = 0; i < NUM_ENTRIES; i++) {
+    for (unsigned int i = 0; i < NUM_ENTRIES; i++) {
         hit[i].store(false);
     }
 
-    qengine->par_for_skip(0, NUM_ENTRIES, 4, 1, [&](const bitCapInt lcv, const int cpu) {
+    PAR_FOR_SKIP(0, NUM_ENTRIES, 4, 1) {
         bool old = true;
-        old = hit[lcv].exchange(old);
+        old = hit[idx].exchange(old);
         REQUIRE(old == false);
-        REQUIRE((lcv & skipBit) == 0);
+        REQUIRE((idx & skipBit) == 0);
 
         calls++;
-    });
+    } PAR_FOR_SKIP_END;
 
     REQUIRE(calls.load() == NUM_CALLS);
 }
@@ -202,8 +210,9 @@ TEST_CASE("test_qengine_cpu_par_for_skip")
 TEST_CASE("test_qengine_cpu_par_for_skip_wide")
 {
     QEngineCPUPtr qengine = std::make_shared<QEngineCPU>(1, 0);
+    int numCores = qengine->GetConcurrencyLevel();
 
-    int NUM_ENTRIES = 2000;
+    unsigned int NUM_ENTRIES = 2000;
     int NUM_CALLS = 1000;
 
     std::atomic_bool hit[NUM_ENTRIES];
@@ -213,26 +222,27 @@ TEST_CASE("test_qengine_cpu_par_for_skip_wide")
 
     int skipBit = 0x4; // Skip 0b100 when counting upwards.
 
-    for (int i = 0; i < NUM_ENTRIES; i++) {
+    for (unsigned int i = 0; i < NUM_ENTRIES; i++) {
         hit[i].store(false);
     }
 
-    qengine->par_for_skip(0, NUM_ENTRIES, 4, 3, [&](const bitCapInt lcv, const int cpu) {
-        REQUIRE(lcv < NUM_ENTRIES);
+    PAR_FOR_SKIP(0, NUM_ENTRIES, 4, 3) {
+        REQUIRE(idx < NUM_ENTRIES);
         bool old = true;
-        old = hit[lcv].exchange(old);
+        old = hit[idx].exchange(old);
         REQUIRE(old == false);
-        REQUIRE((lcv & skipBit) == 0);
+        REQUIRE((idx & skipBit) == 0);
 
         calls++;
-    });
+    } PAR_FOR_SKIP_END;
 }
 
 TEST_CASE("test_qengine_cpu_par_for_mask")
 {
     QEngineCPUPtr qengine = std::make_shared<QEngineCPU>(1, 0);
+    int numCores = qengine->GetConcurrencyLevel();
 
-    int NUM_ENTRIES = 2000;
+    unsigned int NUM_ENTRIES = 2000;
     int NUM_CALLS = 512; // 2048 >> 2, masked off so all bits are set.
 
     std::atomic_bool hit[NUM_ENTRIES];
@@ -243,21 +253,21 @@ TEST_CASE("test_qengine_cpu_par_for_mask")
 
     calls.store(0);
 
-    for (int i = 0; i < NUM_ENTRIES; i++) {
+    for (unsigned int i = 0; i < NUM_ENTRIES; i++) {
         hit[i].store(false);
     }
 
-    qengine->SetConcurrencyLevel(1);
-
-    qengine->par_for_mask(0, NUM_ENTRIES, skipArray, 2, [&](const bitCapInt lcv, const int cpu) {
+    PAR_FOR_MASK(0, NUM_ENTRIES, skipArray, 2)
+    {
+        REQUIRE(cpu < numCores);
         bool old = true;
-        old = hit[lcv].exchange(old);
+        old = hit[idx].exchange(old);
         REQUIRE(old == false);
-        for (int i = 0; i < NUM_SKIP; i++) {
-            REQUIRE((lcv & skipArray[i]) == 0);
+        for (int z = 0; z < NUM_SKIP; z++) {
+            REQUIRE((idx & skipArray[z]) == 0);
         }
         calls++;
-    });
+    } PAR_FOR_MASK_END;
 }
 
 TEST_CASE_METHOD(QInterfaceTestFixture, "test_cnot")

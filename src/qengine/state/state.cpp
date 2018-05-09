@@ -13,6 +13,7 @@
 #include <thread>
 
 #include "qengine_cpu.hpp"
+#include "common/par_for.hpp"
 
 namespace Qrack {
 
@@ -96,20 +97,24 @@ void QEngineCPU::Apply2x2(bitCapInt offset1, bitCapInt offset2, const Complex16*
     if (doCalcNorm && (bitCount == 1)) {
         double* rngNrm = new double[numCores]; 
         std::fill(rngNrm, rngNrm + numCores, 0.0);
-        par_for_mask(0, maxQPower, qPowersSorted, bitCount, [&](const bitCapInt lcv, const int cpu) {
+
+        // par_for_mask(0, maxQPower, qPowersSorted, bitCount, [&](const bitCapInt idx, const int cpu)
+        PAR_FOR_MASK(0, maxQPower, qPowersSorted, bitCount)
+        {
             Complex16 qubit[2];
 
-            qubit[0] = stateVec[lcv + offset1];
-            qubit[1] = stateVec[lcv + offset2];
+            qubit[0] = stateVec[idx + offset1];
+            qubit[1] = stateVec[idx + offset2];
 
             Complex16 Y0 = qubit[0];
             qubit[0] = nrm * ((mtrx[0] * Y0) + (mtrx[1] * qubit[1]));
             qubit[1] = nrm * ((mtrx[2] * Y0) + (mtrx[3] * qubit[1]));
             rngNrm[cpu] += norm(qubit[0]) + norm(qubit[1]);
 
-            stateVec[lcv + offset1] = qubit[0];
-            stateVec[lcv + offset2] = qubit[1];
-        });
+            stateVec[idx + offset1] = qubit[0];
+            stateVec[idx + offset2] = qubit[1];
+        } PAR_FOR_MASK_END;
+        // });
         runningNorm = 0.0;
         for (int i = 0; i < numCores; i++) {
             runningNorm += rngNrm[i];
@@ -118,19 +123,22 @@ void QEngineCPU::Apply2x2(bitCapInt offset1, bitCapInt offset2, const Complex16*
         runningNorm = sqrt(runningNorm);
     }
     else {
-        par_for_mask(0, maxQPower, qPowersSorted, bitCount, [&](const bitCapInt lcv, const int cpu) {
+        // par_for_mask(0, maxQPower, qPowersSorted, bitCount, [&](const bitCapInt idx, const int cpu)
+        PAR_FOR_MASK(0, maxQPower, qPowersSorted, bitCount)
+        {
             Complex16 qubit[2];
 
-            qubit[0] = stateVec[lcv + offset1];
-            qubit[1] = stateVec[lcv + offset2];
+            qubit[0] = stateVec[idx + offset1];
+            qubit[1] = stateVec[idx + offset2];
 
             Complex16 Y0 = qubit[0];
             qubit[0] = nrm * ((mtrx[0] * Y0) + (mtrx[1] * qubit[1]));
             qubit[1] = nrm * ((mtrx[2] * Y0) + (mtrx[3] * qubit[1]));
 
-            stateVec[lcv + offset1] = qubit[0];
-            stateVec[lcv + offset2] = qubit[1];
-        });
+            stateVec[idx + offset1] = qubit[0];
+            stateVec[idx + offset2] = qubit[1];
+        } PAR_FOR_MASK_END;
+        //});
         if (doCalcNorm) {
             UpdateRunningNorm();
         }
@@ -164,9 +172,9 @@ bitLenInt QEngineCPU::Cohere(QEngineCPUPtr toCopy)
 
     Complex16* nStateVec = AllocStateVec(nMaxQPower);
 
-    par_for(0, nMaxQPower, [&](const bitCapInt lcv, const int cpu) {
-        nStateVec[lcv] = stateVec[lcv & startMask] * toCopy->stateVec[(lcv & endMask) >> qubitCount];
-    });
+    PAR_FOR(0, maxQPower) {
+        nStateVec[idx] = stateVec[idx & startMask] * toCopy->stateVec[(idx & endMask) >> qubitCount];
+    } PAR_FOR_END;
 
     SetQubitCount(nQubitCount);
 
@@ -216,14 +224,14 @@ std::map<QInterfacePtr, bitLenInt> QEngineCPU::Cohere(std::vector<QInterfacePtr>
 
     Complex16* nStateVec = AllocStateVec(nMaxQPower);
 
-    par_for(0, nMaxQPower, [&](const bitCapInt lcv, const int cpu) {
-        nStateVec[lcv] = stateVec[lcv & startMask];
+    PAR_FOR(0, maxQPower) {
+        nStateVec[idx] = stateVec[idx & startMask];
 
         for (bitLenInt j = 0; j < toCohereCount; j++) {
             QEngineCPUPtr src = std::dynamic_pointer_cast<Qrack::QEngineCPU>(toCopy[j]);
-            nStateVec[lcv] *= src->stateVec[(lcv & mask[j]) >> offset[j]];
+            nStateVec[idx] *= src->stateVec[(idx & mask[j]) >> offset[j]];
         }
-    });
+    } PAR_FOR_END;
 
     qubitCount = nQubitCount;
     maxQPower = nMaxQPower;
@@ -358,11 +366,11 @@ double QEngineCPU::Prob(bitLenInt qubit)
 
     bitCapInt qPower = 1 << qubit;
     double oneChance = 0;
-    bitCapInt lcv;
+    bitCapInt idx;
 
-    for (lcv = 0; lcv < maxQPower; lcv++) {
-        if ((lcv & qPower) == qPower) {
-            oneChance += norm(stateVec[lcv]);
+    for (idx = 0; idx < maxQPower; idx++) {
+        if ((idx & qPower) == qPower) {
+            oneChance += norm(stateVec[idx]);
         }
     }
 
@@ -381,12 +389,12 @@ double QEngineCPU::ProbAll(bitCapInt fullRegister)
 
 void QEngineCPU::NormalizeState()
 {
-    par_for(0, maxQPower, [&](const bitCapInt lcv, const int cpu) {
-        stateVec[lcv] /= runningNorm;
-        if (norm(stateVec[lcv]) < 1e-15) {
-            stateVec[lcv] = Complex16(0.0, 0.0);
+    PAR_FOR(0, maxQPower) {
+        stateVec[idx] /= runningNorm;
+        if (norm(stateVec[idx]) < 1e-15) {
+            stateVec[idx] = Complex16(0.0, 0.0);
         }
-    });
+    } PAR_FOR_END;
     runningNorm = 1.0;
 }
 
