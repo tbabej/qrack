@@ -118,15 +118,13 @@ void QEngineOCL::SetDevice(const int& dID)
         }
 
         // Otherwise, we're about to switch to a new device, so finish the queue, first.
-        queue.finish();
+        Sync();
     }
 
     deviceID = dID;
     device_context = OCLEngine::Instance()->GetDeviceContextPtr(deviceID);
     context = device_context->context;
     queue = device_context->queue;
-
-    queue.finish();
 
     OCLDeviceCall ocl = device_context->Reserve(OCL_API_UPDATENORM);
     bitCapInt oldNrmGroupCount = nrmGroupCount;

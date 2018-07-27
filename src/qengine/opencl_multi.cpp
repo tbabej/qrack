@@ -143,7 +143,6 @@ void QEngineOCLMulti::SingleBitGate(bool doNormalize, bitLenInt bit, F fn, Args.
 
     if (bit < subQubitCount) {
         par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
-            substateEngines[lcv]->Sync();
             substateEngines[lcv]->SetDevice(dev);
             ((substateEngines[lcv].get())->*fn)(gfnArgs..., bit);
         });
@@ -152,8 +151,6 @@ void QEngineOCLMulti::SingleBitGate(bool doNormalize, bitLenInt bit, F fn, Args.
         // It's always a matter of swapping the high halves of half the sub-engines with the low halves of the other
         // half of engines, acting the maximum bit gate, (for the sub-engine bit count,) and swapping back. Depending on
         // the bit index and number of sub-engines, we just have to determine which sub-engine to pair with which.
-        std::vector<std::future<void>> futures(subEngineCount / 2);
-
         bitLenInt groupSize = 1 << ((bit + 1) - subQubitCount);
         bitLenInt sqi = subQubitCount - 1;
 
@@ -162,10 +159,8 @@ void QEngineOCLMulti::SingleBitGate(bool doNormalize, bitLenInt bit, F fn, Args.
             bitLenInt k = lcv - (j * (groupSize / 2));
 
             QEngineOCLPtr engine1 = substateEngines[k + (j * groupSize)];
-            engine1->Sync();
             engine1->SetDevice(dev);
             QEngineOCLPtr engine2 = substateEngines[k + (j * groupSize) + (groupSize / 2)];
-            engine2->Sync();
             engine2->SetDevice(dev);
 
             ShuffleBuffers(engine1, engine2);
@@ -286,22 +281,17 @@ void QEngineOCLMulti::SetPermutation(bitCapInt perm)
         return;
     }
 
-    std::vector<std::future<void>> futures(subEngineCount);
-    bitCapInt i;
-    bitCapInt j = 0;
-    for (i = 0; i < maxQPower; i += subMaxQPower) {
+    par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+        bitCapInt i = lcv * subMaxQPower;
+        QEngineOCLPtr engine = substateEngines[lcv];
+        engine->SetDevice(dev);
         if ((perm >= i) && (perm < (i + subMaxQPower))) {
-            QEngineOCLPtr engine = substateEngines[j];
             bitCapInt p = perm - i;
-            futures[j] = std::async(std::launch::async, [engine, p]() { engine->SetPermutation(p); });
+            engine->SetPermutation(p);
         } else {
-            futures[j] = std::async(std::launch::async, [this, j]() { substateEngines[j]->NormalizeState(0.0); });
+            engine->NormalizeState(0.0);
         }
-        j++;
-    }
-    for (i = 0; i < subEngineCount; i++) {
-        futures[i].get();
-    }
+    });
 }
 
 // Certain difficult and/or less essential methods have not been parallelized.
