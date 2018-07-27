@@ -28,10 +28,10 @@ protected:
     bitCapInt subMaxQPower;
     bitLenInt subEngineCount;
     bitLenInt maxDeviceOrder;
+    bitLenInt oclDeviceCount;
     OCLEngine* clObj;
     std::vector<QEngineOCLPtr> substateEngines;
     std::vector<std::vector<cl::Buffer>> substateBuffers;
-    std::vector<int> deviceIDs;
 
 public:
     /**
@@ -44,23 +44,6 @@ public:
      */
     QEngineOCLMulti(bitLenInt qBitCount, bitCapInt initState, std::shared_ptr<std::default_random_engine> rgp = nullptr,
         int deviceCount = -1);
-
-    /**
-     * Initialize a Qrack::QEngineOCLMulit object. Specify the number of qubits and an initial permutation state.
-     * Additionally, optionally specify a list of device IDs for sub-engines and a pointer to a random generator engine
-     * object.
-     *
-     * "devIDs" is a list of integers that represent the index of OpenCL devices in the OCLEngine singleton, to select
-     * how equal sized sub-engines are distributed between devices in this engine. The QEngineOCLMulti will only have a
-     * power of 2 count of subengines at a time, and not more than 1 power of 2 devices per qubit. (2^N devices for N
-     * qubits.) Devices in excess of the highest power of two in the list count will essentially be ignored. Powers of 2
-     * in excess of the qubit count will only be used if this engine acquires additional qubits. It might be possible to
-     * load balance this way, for example, by allocating 3 sub-engines on one device index and one sub-engine on a
-     * second device index. (Whether this is an efficient load balancing mechanism will depend on the particulars of the
-     * system architecture and instance initialization.)
-     */
-    QEngineOCLMulti(bitLenInt qBitCount, bitCapInt initState, std::vector<int> devIDs,
-        std::shared_ptr<std::default_random_engine> rgp = nullptr);
 
     virtual void SetQubitCount(bitLenInt qb)
     {
@@ -207,7 +190,7 @@ protected:
     void ApplyM(bitCapInt qPower, bool result, complex nrm) { throw "ApplyM not implemented in interface"; }
 
 private:
-    void Init(bitLenInt qBitCount, bitCapInt initState);
+    void Init(bitLenInt qBitCount, bitCapInt initState, bitLenInt engineCount);
 
     void ShuffleBuffers(QEngineOCLPtr engine1, QEngineOCLPtr engine2);
 

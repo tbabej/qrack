@@ -22,6 +22,25 @@ namespace Qrack {
  * Iterate through the permutations a maximum of end-begin times, allowing the
  * caller to control the incrementation offset through 'inc'.
  */
+void ParallelFor::par_for_device(const bitCapInt begin, const bitCapInt itemCount, const bitLenInt devCount, ParallelFunc fn) {
+    std::atomic<bitCapInt> idx;
+    idx = 0;
+    std::vector<std::future<void>> futures(devCount);
+    for (int dev = 0; dev < devCount; dev++) {
+        futures[dev] = std::async(std::launch::async, [dev, &idx, begin, itemCount, fn]() {
+            for (bitCapInt i = idx++; true; i = idx++) {
+                if (i >= itemCount) {
+                    break;
+                }
+                fn(begin + i, dev);
+            }
+        });
+    }
+    for (int dev = 0; dev < devCount; dev++) {
+        futures[dev].get();
+    }
+}
+
 void ParallelFor::par_for_inc(const bitCapInt begin, const bitCapInt itemCount, IncrementFunc inc, ParallelFunc fn)
 {
     if (((int)itemCount) <= numCores) {

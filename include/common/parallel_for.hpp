@@ -41,6 +41,11 @@ public:
     typedef std::function<bitCapInt(const bitCapInt, const int cpu)> IncrementFunc;
 
     /**
+     * Iterate through available OpenCL devices, to distribute work for QEngineOCLMulti
+     */
+    void par_for_device(const bitCapInt begin, const bitCapInt itemCount, const bitLenInt devCount, ParallelFunc fn);
+
+    /**
      * Iterate through the permutations a maximum of end-begin times, allowing
      * the caller to control the incrementation offset through 'inc'.
      */

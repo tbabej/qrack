@@ -36,7 +36,6 @@ namespace Qrack {
 QEngineOCLMulti::QEngineOCLMulti(
     bitLenInt qBitCount, bitCapInt initState, std::shared_ptr<std::default_random_engine> rgp, int deviceCount)
     : QInterface(qBitCount, rgp)
-    , deviceIDs()
 {
     clObj = OCLEngine::Instance();
 
@@ -44,38 +43,16 @@ QEngineOCLMulti::QEngineOCLMulti(
         deviceCount = clObj->GetDeviceCount();
     }
 
-    deviceIDs.resize(deviceCount);
-    for (int i = 0; i < deviceCount; i++) {
-        deviceIDs[i] = i;
-    }
+    oclDeviceCount = deviceCount;
 
-    Init(qBitCount, initState);
+    Init(qBitCount, initState, deviceCount * 2);
 }
 
-QEngineOCLMulti::QEngineOCLMulti(
-    bitLenInt qBitCount, bitCapInt initState, std::vector<int> devIDs, std::shared_ptr<std::default_random_engine> rgp)
-    : QInterface(qBitCount, rgp)
-    , deviceIDs(devIDs)
+void QEngineOCLMulti::Init(bitLenInt qBitCount, bitCapInt initState, bitLenInt engineCount)
 {
-    clObj = OCLEngine::Instance();
-    Init(qBitCount, initState);
-}
-
-void QEngineOCLMulti::Init(bitLenInt qBitCount, bitCapInt initState)
-{
-    // It's possible to do a simple form of load balancing by assigning unequal portions of subengines to the same
-    // device:
-    // deviceIDs.resize(4);
-    // deviceIDs[0] = 1;
-    // deviceIDs[1] = 1;
-    // deviceIDs[2] = 1;
-    // deviceIDs[3] = 0;
-
     runningNorm = 1.0;
 
-    int deviceCount = deviceIDs.size();
-
-    bitLenInt devPow = log2(deviceCount);
+    bitLenInt devPow = log2(engineCount);
     maxDeviceOrder = devPow;
 
     // Maximum of 2^N devices for N qubits:
@@ -83,14 +60,14 @@ void QEngineOCLMulti::Init(bitLenInt qBitCount, bitCapInt initState)
         devPow = qubitCount - 1;
     }
 
-    deviceCount = 1 << devPow;
-    subEngineCount = deviceCount;
+    engineCount = 1 << devPow;
+    subEngineCount = engineCount;
 
     subQubitCount = qubitCount - devPow;
     subMaxQPower = 1 << subQubitCount;
 
-    if (deviceCount == 1) {
-        substateEngines.push_back(std::make_shared<QEngineOCL>(qubitCount, initState, rand_generator, deviceIDs[0]));
+    if (engineCount == 1) {
+        substateEngines.push_back(std::make_shared<QEngineOCL>(qubitCount, initState, rand_generator, 0));
         substateEngines[0]->EnableNormalize(true);
         return;
     }
@@ -99,7 +76,7 @@ void QEngineOCLMulti::Init(bitLenInt qBitCount, bitCapInt initState)
     bool partialInit = true;
     bitCapInt subInitVal;
 
-    for (int i = 0; i < deviceCount; i++) {
+    for (int i = 0; i < engineCount; i++) {
         if ((!foundInitState) && ((subMaxQPower * (i + 1)) > initState)) {
             subInitVal = initState - (subMaxQPower * i);
             foundInitState = true;
@@ -107,7 +84,7 @@ void QEngineOCLMulti::Init(bitLenInt qBitCount, bitCapInt initState)
         }
         // All sub-engines should have zero norm except for the one containing the initialization permutation:
         substateEngines.push_back(
-            std::make_shared<QEngineOCL>(subQubitCount, subInitVal, rand_generator, deviceIDs[i], partialInit));
+            std::make_shared<QEngineOCL>(subQubitCount, subInitVal, rand_generator, (i * oclDeviceCount) / engineCount, partialInit));
         substateEngines[i]->EnableNormalize(false);
         subInitVal = 0;
         partialInit = true;
@@ -149,7 +126,7 @@ void QEngineOCLMulti::SingleBitGate(bool doNormalize, bitLenInt bit, F fn, Args.
         return;
     }
 
-    bitLenInt i, j;
+    bitLenInt i;
 
     if (runningNorm != 1.0) {
         for (i = 0; i < subEngineCount; i++) {
@@ -165,50 +142,45 @@ void QEngineOCLMulti::SingleBitGate(bool doNormalize, bitLenInt bit, F fn, Args.
     }
 
     if (bit < subQubitCount) {
-        // In this branch, the gate is entirely independent in the parallel sub-engines
-        std::vector<std::future<void>> futures(subEngineCount);
-        for (i = 0; i < subEngineCount; i++) {
-            QEngineOCLPtr engine = substateEngines[i];
-            futures[i] = std::async(
-                std::launch::async, [engine, fn, bit, gfnArgs...]() { ((engine.get())->*fn)(gfnArgs..., bit); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            futures[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            ((substateEngines[lcv].get())->*fn)(gfnArgs..., bit);
+            substateEngines[lcv]->Sync();
+        });
     } else {
         // Here, the gate requires data to cross sub-engine boundaries.
         // It's always a matter of swapping the high halves of half the sub-engines with the low halves of the other
         // half of engines, acting the maximum bit gate, (for the sub-engine bit count,) and swapping back. Depending on
         // the bit index and number of sub-engines, we just have to determine which sub-engine to pair with which.
-        std::vector<std::future<void>> futures(subEngineCount / 2);
 
-        bitLenInt groupCount = 1 << (qubitCount - (bit + 1));
         bitLenInt groupSize = 1 << ((bit + 1) - subQubitCount);
         bitLenInt sqi = subQubitCount - 1;
 
-        for (i = 0; i < groupCount; i++) {
-            for (j = 0; j < (groupSize / 2); j++) {
-                futures[j + (i * (groupSize / 2))] =
-                    std::async(std::launch::async, [this, groupSize, i, j, fn, sqi, gfnArgs...]() {
-                        QEngineOCLPtr engine1 = substateEngines[j + (i * groupSize)];
-                        QEngineOCLPtr engine2 = substateEngines[j + (i * groupSize) + (groupSize / 2)];
+        par_for_device(0, subEngineCount / 2, oclDeviceCount, [&](int lcv, int dev) {
+            bitLenInt j = lcv / (groupSize / 2);
+            bitLenInt k = lcv - (j * (groupSize / 2));
+            
+            QEngineOCLPtr engine1 = substateEngines[k + (j * groupSize)];
+            QEngineOCLPtr engine2 = substateEngines[k + (j * groupSize) + (groupSize / 2)];
 
-                        ShuffleBuffers(engine1, engine2);
+            engine1->SetDevice(dev);
+            engine2->SetDevice(dev);
 
-                        std::future<void> future1 = std::async(std::launch::async,
-                            [engine1, fn, sqi, gfnArgs...]() { ((engine1.get())->*fn)(gfnArgs..., sqi); });
-                        std::future<void> future2 = std::async(std::launch::async,
-                            [engine2, fn, sqi, gfnArgs...]() { ((engine2.get())->*fn)(gfnArgs..., sqi); });
-                        future1.get();
-                        future2.get();
+            ShuffleBuffers(engine1, engine2);
 
-                        ShuffleBuffers(engine1, engine2);
-                    });
-            }
-        }
-        for (i = 0; i < subEngineCount / 2; i++) {
-            futures[i].get();
-        }
+            std::future<void> future1 = std::async(std::launch::async, [engine1, fn, sqi, gfnArgs...]() {
+                ((engine1.get())->*fn)(gfnArgs..., sqi);
+                engine1->Sync();
+            });
+            std::future<void> future2 = std::async(std::launch::async, [engine2, fn, sqi, gfnArgs...]() {
+                ((engine2.get())->*fn)(gfnArgs..., sqi);
+                engine2->Sync();
+            });
+            future1.get();
+            future2.get();
+
+            ShuffleBuffers(engine1, engine2);
+        });
     }
 
     if (doNormalize) {
@@ -316,22 +288,17 @@ void QEngineOCLMulti::SetPermutation(bitCapInt perm)
         return;
     }
 
-    std::vector<std::future<void>> futures(subEngineCount);
-    bitCapInt i;
-    bitCapInt j = 0;
-    for (i = 0; i < maxQPower; i += subMaxQPower) {
+    par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+        bitCapInt i = lcv * subMaxQPower;
+        substateEngines[lcv]->SetDevice(dev);
         if ((perm >= i) && (perm < (i + subMaxQPower))) {
-            QEngineOCLPtr engine = substateEngines[j];
             bitCapInt p = perm - i;
-            futures[j] = std::async(std::launch::async, [engine, p]() { engine->SetPermutation(p); });
+            substateEngines[lcv]->SetPermutation(p);
         } else {
-            futures[j] = std::async(std::launch::async, [this, j]() { substateEngines[j]->NormalizeState(0.0); });
+            substateEngines[lcv]->NormalizeState(0.0);
         }
-        j++;
-    }
-    for (i = 0; i < subEngineCount; i++) {
-        futures[i].get();
-    }
+        substateEngines[lcv]->Sync();
+    });
 }
 
 // Certain difficult and/or less essential methods have not been parallelized.
@@ -467,15 +434,11 @@ bool QEngineOCLMulti::M(bitLenInt qubit)
     }
 
     if (qubit < subQubitCount) {
-        std::vector<std::future<void>> futures(subEngineCount);
-        for (i = 0; i < subEngineCount; i++) {
-            QEngineOCLPtr engine = substateEngines[i];
-            futures[i] = std::async(
-                std::launch::async, [engine, qubit, result, nrmlzr]() { engine->ForceM(qubit, result, true, nrmlzr); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            futures[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            substateEngines[lcv]->ForceM(qubit, result, true, nrmlzr);
+            substateEngines[lcv]->Sync();
+        });
     } else {
         std::vector<std::future<void>> futures(subEngineCount / 2);
         bitLenInt groupCount = 1 << (qubitCount - (qubit + 1));
@@ -583,41 +546,39 @@ void QEngineOCLMulti::MetaControlled(
     bitLenInt sqi = subQubitCount - 1;
 
     bitLenInt maxLCV = subEngineCount >> (sortedMasks.size());
-    std::vector<std::future<void>> futures(maxLCV);
 
-    for (i = 0; i < maxLCV; i++) {
-        futures[i] =
-            std::async(std::launch::async, [this, i, &sortedMasks, &controlMask, &targetMask, &sqi, fn, gfnArgs...]() {
+    par_for_device(0, maxLCV, oclDeviceCount, [&](int i, int dev) {
+        bitCapInt j, k, jLo, jHi;
+        jHi = i;
+        j = 0;
+        for (k = 0; k < (sortedMasks.size()); k++) {
+            jLo = jHi & sortedMasks[k];
+            jHi = (jHi ^ jLo) << 1;
+            j |= jLo;
+        }
+        j |= jHi | controlMask;
 
-                bitCapInt j, k, jLo, jHi;
-                jHi = i;
-                j = 0;
-                for (k = 0; k < (sortedMasks.size()); k++) {
-                    jLo = jHi & sortedMasks[k];
-                    jHi = (jHi ^ jLo) << 1;
-                    j |= jLo;
-                }
-                j |= jHi | controlMask;
+        QEngineOCLPtr engine1 = substateEngines[j];
+        QEngineOCLPtr engine2 = substateEngines[j + targetMask];
 
-                QEngineOCLPtr engine1 = substateEngines[j];
-                QEngineOCLPtr engine2 = substateEngines[j + targetMask];
+        engine1->SetDevice(dev);
+        engine2->SetDevice(dev);
 
-                ShuffleBuffers(engine1, engine2);
+        ShuffleBuffers(engine1, engine2);
 
-                std::future<void> future1 = std::async(
-                    std::launch::async, [engine1, fn, sqi, gfnArgs...]() { ((engine1.get())->*fn)(gfnArgs..., sqi); });
-                std::future<void> future2 = std::async(
-                    std::launch::async, [engine2, fn, sqi, gfnArgs...]() { ((engine2.get())->*fn)(gfnArgs..., sqi); });
-                future1.get();
-                future2.get();
+        std::future<void> future1 = std::async(std::launch::async, [engine1, fn, sqi, gfnArgs...]() {
+            ((engine1.get())->*fn)(gfnArgs..., sqi);
+            engine1->Sync();
+        });
+        std::future<void> future2 = std::async(std::launch::async, [engine2, fn, sqi, gfnArgs...]() {
+            ((engine2.get())->*fn)(gfnArgs..., sqi);
+            engine2->Sync();
+        });
+        future1.get();
+        future2.get();
 
-                ShuffleBuffers(engine1, engine2);
-            });
-    }
-
-    for (i = 0; i < maxLCV; i++) {
-        futures[i].get();
-    }
+        ShuffleBuffers(engine1, engine2);
+    });
 }
 
 // This is called when control bits are "meta-" but the target bit is below the "meta-" threshold, (low enough to fit in
@@ -639,25 +600,19 @@ void QEngineOCLMulti::SemiMetaControlled(
     }
     std::sort(sortedMasks.begin(), sortedMasks.end());
 
-    std::vector<std::future<void>> futures(maxLCV);
-    for (i = 0; i < maxLCV; i++) {
-        futures[i] = std::async(std::launch::async, [this, i, fn, sortedMasks, controlMask, targetBit, gfnArgs...]() {
-            bitCapInt j, k, jLo, jHi;
-            jHi = i;
-            j = 0;
-            for (k = 0; k < (sortedMasks.size()); k++) {
-                jLo = jHi & sortedMasks[k];
-                jHi = (jHi ^ jLo) << 1;
-                j |= jLo;
-            }
-            j |= jHi | controlMask;
+    par_for_device(0, maxLCV, oclDeviceCount, [&](int i, int dev) {
+        bitCapInt j, k, jLo, jHi;
+        jHi = i;
+        j = 0;
+        for (k = 0; k < (sortedMasks.size()); k++) {
+            jLo = jHi & sortedMasks[k];
+            jHi = (jHi ^ jLo) << 1;
+            j |= jLo;
+        }
+        j |= jHi | controlMask;
 
-            (substateEngines[j].get()->*fn)(gfnArgs..., targetBit);
-        });
-    }
-    for (i = 0; i < maxLCV; i++) {
-        futures[i].get();
-    }
+        (substateEngines[j].get()->*fn)(gfnArgs..., targetBit);
+    });
 }
 
 // This is the particular edge case between any "meta-" gate and any gate entirely below the "meta-"/"embarrassingly
@@ -665,37 +620,34 @@ void QEngineOCLMulti::SemiMetaControlled(
 template <typename F, typename... Args>
 void QEngineOCLMulti::ControlledSkip(bool anti, bitLenInt controlDepth, bitLenInt targetBit, F fn, Args... gfnArgs)
 {
-    bitLenInt i, j;
-    bitLenInt k = 0;
     bitLenInt groupCount = 1 << (qubitCount - (targetBit + 1));
     bitLenInt groupSize = 1 << ((targetBit + 1) - subQubitCount);
-    std::vector<std::future<void>> futures((groupCount * groupSize) / 2);
     bitLenInt sqi = subQubitCount - 1;
     bitLenInt jStart = (anti | (controlDepth == 0)) ? 0 : ((groupSize / 2) - 1);
     bitLenInt jInc = (controlDepth == 0) ? 1 : 2;
 
-    for (i = 0; i < groupCount; i++) {
-        for (j = jStart; j < (groupSize / 2); j += jInc) {
-            futures[k] = std::async(std::launch::async, [this, groupSize, i, j, fn, sqi, anti, gfnArgs...]() {
-                QEngineOCLPtr engine1 = substateEngines[j + (i * groupSize)];
-                QEngineOCLPtr engine2 = substateEngines[j + (i * groupSize) + (groupSize / 2)];
+    par_for_device(0, (groupCount * groupSize) / 2, oclDeviceCount, [&](int lcv, int dev) {
+        bitLenInt i = lcv / (groupSize / 2);
+        bitLenInt j = jStart + (lcv - (i * (groupSize / 2))) * jInc;
 
-                ShuffleBuffers(engine1, engine2);
+        QEngineOCLPtr engine1 = substateEngines[j + (i * groupSize)];
+        QEngineOCLPtr engine2 = substateEngines[j + (i * groupSize) + (groupSize / 2)];
 
-                if (anti) {
-                    ((engine1.get())->*fn)(gfnArgs..., sqi);
-                } else {
-                    ((engine2.get())->*fn)(gfnArgs..., sqi);
-                }
+        engine1->SetDevice(dev);
+        engine2->SetDevice(dev);
 
-                ShuffleBuffers(engine1, engine2);
-            });
-            k++;
+        ShuffleBuffers(engine1, engine2);
+
+        if (anti) {
+            ((engine1.get())->*fn)(gfnArgs..., sqi);
+            engine1->Sync();
+        } else {
+            ((engine2.get())->*fn)(gfnArgs..., sqi);
+            engine2->Sync();
         }
-    }
-    for (i = 0; i < k; i++) {
-        futures[i].get();
-    }
+
+        ShuffleBuffers(engine1, engine2);
+    });
 }
 
 void QEngineOCLMulti::ApplySingleBit(const complex* mtrx, bool doCalcNorm, bitLenInt qubitIndex)
@@ -1107,16 +1059,11 @@ void QEngineOCLMulti::Swap(bitLenInt qubitIndex1, bitLenInt qubitIndex2)
 
     if ((qubitIndex1 < subQubitCount) && (qubitIndex2 < subQubitCount)) {
         // Here, it's entirely contained within single nodes:
-        std::vector<std::future<void>> futures(subEngineCount);
-        bitLenInt i;
-        for (i = 0; i < subEngineCount; i++) {
-            QEngineOCLPtr engine = substateEngines[i];
-            futures[i] = std::async(
-                std::launch::async, [engine, qubitIndex1, qubitIndex2]() { engine->Swap(qubitIndex1, qubitIndex2); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            futures[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            substateEngines[lcv]->Swap(qubitIndex1, qubitIndex2);
+            substateEngines[lcv]->Sync();
+        });
     } else if ((qubitIndex1 >= subQubitCount) && (qubitIndex2 >= subQubitCount)) {
         // Here, it's possible to swap entire engines:
         qubitIndex1 -= subQubitCount;
@@ -1174,33 +1121,34 @@ real1 QEngineOCLMulti::Prob(bitLenInt qubitIndex)
     NormalizeState();
 
     real1 oneChance = 0.0;
-    bitLenInt i, j, k;
+
+    real1 nrmParts[oclDeviceCount];
+    bitLenInt k = 0;
+    for (k = 0; k < oclDeviceCount; k++) {
+        nrmParts[k] = 0.0;
+    }
 
     if (qubitIndex < subQubitCount) {
-        std::vector<std::future<real1>> futures(subEngineCount);
-        for (i = 0; i < subEngineCount; i++) {
-            QEngineOCLPtr engine = substateEngines[i];
-            futures[i] = std::async(std::launch::async, [engine, qubitIndex]() { return engine->Prob(qubitIndex); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            oneChance += futures[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            nrmParts[dev] += (substateEngines[lcv]->Prob(qubitIndex));
+            substateEngines[lcv]->Sync();
+        });
     } else {
-        std::vector<std::future<real1>> futures(subEngineCount / 2);
-        bitLenInt groupCount = 1 << (qubitCount - (qubitIndex + 1));
         bitLenInt groupSize = 1 << ((qubitIndex + 1) - subQubitCount);
-        k = 0;
-        for (i = 0; i < groupCount; i++) {
-            for (j = 0; j < (groupSize / 2); j++) {
-                QEngineOCLPtr engine = substateEngines[j + (i * groupSize) + (groupSize / 2)];
-                futures[k] = std::async(std::launch::async, [engine, qubitIndex]() { return engine->GetNorm(); });
-                k++;
-            }
-        }
-
-        for (i = 0; i < k; i++) {
-            oneChance += futures[i].get();
-        }
+        
+        par_for_device(0, subEngineCount / 2, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            bitLenInt i = lcv / (groupSize / 2);
+            bitLenInt j = lcv - (i * (groupSize / 2));
+            bitLenInt index = j + (i * groupSize) + (groupSize / 2);
+            
+            substateEngines[index]->SetDevice(dev);
+            nrmParts[dev] += substateEngines[index]->GetNorm();
+            substateEngines[index]->Sync();
+        });
+    }
+    for (k = 0; k < oclDeviceCount; k++) {
+        oneChance += nrmParts[k];
     }
 
     return oneChance;
@@ -1233,7 +1181,7 @@ void QEngineOCLMulti::CombineEngines(bitLenInt bit)
     bool isMapped;
 
     for (i = 0; i < groupCount; i++) {
-        nEngines[i] = std::make_shared<QEngineOCL>((bit + 1), 0, rand_generator, deviceIDs[i]);
+        nEngines[i] = std::make_shared<QEngineOCL>((bit + 1), 0, rand_generator, (i * oclDeviceCount) / groupCount);
         nEngines[i]->EnableNormalize(false);
         isMapped = false;
         complex* nsv = nullptr;
@@ -1300,7 +1248,7 @@ void QEngineOCLMulti::SeparateEngines()
         complex* sv = nullptr;
         for (j = 0; j < groupSize; j++) {
             QEngineOCLPtr nEngine =
-                std::make_shared<QEngineOCL>(qubitCount - log2(engineCount), 0, rand_generator, deviceIDs[j], true);
+                std::make_shared<QEngineOCL>(qubitCount - log2(engineCount), 0, rand_generator, (j * oclDeviceCount) / groupSize, true);
             nEngine->EnableNormalize(false);
             if ((nEngine->GetCLContextID()) == (eng->GetCLContextID())) {
                 cl::CommandQueue& queue = eng->GetCLQueue();
@@ -1416,15 +1364,12 @@ void QEngineOCLMulti::NormalizeState(real1 nrm)
         return;
     }
 
-    bitLenInt i;
     if (runningNorm != 1.0) {
-        std::vector<std::future<void>> nf(subEngineCount);
-        for (i = 0; i < subEngineCount; i++) {
-            nf[i] = std::async(std::launch::async, [this, i]() { substateEngines[i]->NormalizeState(runningNorm); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            nf[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            substateEngines[lcv]->NormalizeState(runningNorm);
+            substateEngines[lcv]->Sync();
+        });
     }
     runningNorm = 1.0;
 }
