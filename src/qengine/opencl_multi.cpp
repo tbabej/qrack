@@ -45,7 +45,7 @@ QEngineOCLMulti::QEngineOCLMulti(
 
     oclDeviceCount = deviceCount;
 
-    Init(qBitCount, initState, deviceCount * 2);
+    Init(qBitCount, initState, deviceCount * 4);
 }
 
 void QEngineOCLMulti::Init(bitLenInt qBitCount, bitCapInt initState, bitLenInt engineCount)
@@ -413,8 +413,6 @@ bool QEngineOCLMulti::M(bitLenInt qubit)
 
     NormalizeState();
 
-    int i, j;
-
     real1 prob = Rand();
     real1 oneChance = Prob(qubit);
 
@@ -427,18 +425,11 @@ bool QEngineOCLMulti::M(bitLenInt qubit)
     }
 
     if (qubit < subQubitCount) {
-        std::vector<std::future<void>> futures(subEngineCount);
-        for (i = 0; i < subEngineCount; i++) {
-            QEngineOCLPtr engine = substateEngines[i];
-            futures[i] = std::async(
-                std::launch::async, [engine, qubit, result, nrmlzr]() { engine->ForceM(qubit, result, true, nrmlzr); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            futures[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            substateEngines[lcv]->ForceM(qubit, result, true, nrmlzr);
+        });
     } else {
-        std::vector<std::future<void>> futures(subEngineCount / 2);
-        bitLenInt groupCount = 1 << (qubitCount - (qubit + 1));
         bitLenInt groupSize = 1 << ((qubit + 1) - subQubitCount);
         bitLenInt keepOffset, clearOffset;
         if (result) {
@@ -448,23 +439,19 @@ bool QEngineOCLMulti::M(bitLenInt qubit)
             keepOffset = 0;
             clearOffset = 1;
         }
-        for (i = 0; i < groupCount; i++) {
-            for (j = 0; j < (groupSize / 2); j++) {
-                futures[j + (i * (groupSize / 2))] =
-                    std::async(std::launch::async, [this, i, j, &groupSize, &clearOffset, &keepOffset, &nrmlzr]() {
-                        bitLenInt clearIndex = j + (i * groupSize) + (clearOffset * groupSize / 2);
-                        bitLenInt keepIndex = j + (i * groupSize) + (keepOffset * groupSize / 2);
+        par_for_device(0, subEngineCount / 2, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            bitLenInt i = lcv / (groupSize / 2);
+            bitLenInt j = lcv - (i * (groupSize / 2));
+      
+            bitLenInt clearIndex = j + (i * groupSize) + (clearOffset * groupSize / 2);
+            bitLenInt keepIndex = j + (i * groupSize) + (keepOffset * groupSize / 2);
 
-                        substateEngines[clearIndex]->NormalizeState(0.0);
-                        substateEngines[keepIndex]->NormalizeState(nrmlzr);
+            substateEngines[clearIndex]->SetDevice(dev);
+            substateEngines[clearIndex]->NormalizeState(0.0);
+            substateEngines[keepIndex]->SetDevice(dev);
+            substateEngines[keepIndex]->NormalizeState(nrmlzr);
 
-                    });
-            }
-        }
-
-        for (i = 0; i < (subEngineCount / 2); i++) {
-            futures[i].get();
-        }
+        });
     }
 
     return result;
@@ -523,13 +510,12 @@ template <typename F, typename... Args>
 void QEngineOCLMulti::MetaControlled(
     bool anti, std::vector<bitLenInt> controls, bitLenInt target, F fn, Args... gfnArgs)
 {
-    bitLenInt i;
 
     std::vector<bitLenInt> sortedMasks(1 + controls.size());
     sortedMasks[controls.size()] = 1 << target;
 
     bitCapInt controlMask = 0;
-    for (i = 0; i < controls.size(); i++) {
+    for (bitLenInt i = 0; i < controls.size(); i++) {
         sortedMasks[i] = 1 << controls[i];
         if (!anti) {
             controlMask |= sortedMasks[i];
@@ -543,41 +529,34 @@ void QEngineOCLMulti::MetaControlled(
     bitLenInt sqi = subQubitCount - 1;
 
     bitLenInt maxLCV = subEngineCount >> (sortedMasks.size());
-    std::vector<std::future<void>> futures(maxLCV);
 
-    for (i = 0; i < maxLCV; i++) {
-        futures[i] =
-            std::async(std::launch::async, [this, i, &sortedMasks, &controlMask, &targetMask, &sqi, fn, gfnArgs...]() {
+    par_for_device(0, maxLCV, oclDeviceCount, [&](bitCapInt i, int dev) {
+        bitCapInt j, k, jLo, jHi;
+        jHi = i;
+        j = 0;
+        for (k = 0; k < (sortedMasks.size()); k++) {
+            jLo = jHi & sortedMasks[k];
+            jHi = (jHi ^ jLo) << 1;
+            j |= jLo;
+        }
+        j |= jHi | controlMask;
 
-                bitCapInt j, k, jLo, jHi;
-                jHi = i;
-                j = 0;
-                for (k = 0; k < (sortedMasks.size()); k++) {
-                    jLo = jHi & sortedMasks[k];
-                    jHi = (jHi ^ jLo) << 1;
-                    j |= jLo;
-                }
-                j |= jHi | controlMask;
+        QEngineOCLPtr engine1 = substateEngines[j];
+        engine1->SetDevice(dev);
+        QEngineOCLPtr engine2 = substateEngines[j + targetMask];
+        engine2->SetDevice(dev);
 
-                QEngineOCLPtr engine1 = substateEngines[j];
-                QEngineOCLPtr engine2 = substateEngines[j + targetMask];
+        ShuffleBuffers(engine1, engine2);
 
-                ShuffleBuffers(engine1, engine2);
+        std::future<void> future1 = std::async(
+            std::launch::async, [engine1, fn, sqi, gfnArgs...]() { ((engine1.get())->*fn)(gfnArgs..., sqi); });
+        std::future<void> future2 = std::async(
+            std::launch::async, [engine2, fn, sqi, gfnArgs...]() { ((engine2.get())->*fn)(gfnArgs..., sqi); });
+        future1.get();
+        future2.get();
 
-                std::future<void> future1 = std::async(
-                    std::launch::async, [engine1, fn, sqi, gfnArgs...]() { ((engine1.get())->*fn)(gfnArgs..., sqi); });
-                std::future<void> future2 = std::async(
-                    std::launch::async, [engine2, fn, sqi, gfnArgs...]() { ((engine2.get())->*fn)(gfnArgs..., sqi); });
-                future1.get();
-                future2.get();
-
-                ShuffleBuffers(engine1, engine2);
-            });
-    }
-
-    for (i = 0; i < maxLCV; i++) {
-        futures[i].get();
-    }
+        ShuffleBuffers(engine1, engine2);
+    });
 }
 
 // This is called when control bits are "meta-" but the target bit is below the "meta-" threshold, (low enough to fit in
