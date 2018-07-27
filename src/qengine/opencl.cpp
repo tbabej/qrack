@@ -1054,6 +1054,7 @@ void QEngineOCL::NormalizeState(real1 nrm)
     if (nrm < min_norm) {
         queue.finish();
         queue.enqueueFillBuffer(*stateBuffer, complex(0.0, 0.0), 0, sizeof(complex) * maxQPower);
+        queue.finish();
         runningNorm = 0.0;
         return;
     }
