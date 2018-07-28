@@ -1159,6 +1159,7 @@ void QEngineOCLMulti::CombineEngines(bitLenInt bit)
         complex* nsv = nullptr;
         for (j = 0; j < groupSize; j++) {
             QEngineOCLPtr eng = substateEngines[j + (i * groupSize)];
+            eng->Sync();
             if ((nEngines[i]->GetCLContextID()) == (eng->GetCLContextID())) {
                 cl::CommandQueue& queue = eng->GetCLQueue();
                 queue.enqueueCopyBuffer(*(eng->GetStateBuffer()), *(nEngines[i]->GetStateBuffer()), 0,
@@ -1216,6 +1217,7 @@ void QEngineOCLMulti::SeparateEngines()
 
     for (i = 0; i < subEngineCount; i++) {
         QEngineOCLPtr eng = substateEngines[i];
+        eng->Sync();
         isMapped = false;
         complex* sv = nullptr;
         for (j = 0; j < groupSize; j++) {
@@ -1270,13 +1272,10 @@ template <typename F> void QEngineOCLMulti::CombineAndOp(F fn, std::vector<bitLe
         CombineEngines(highestBit);
     }
 
-    std::vector<std::future<void>> futures(subEngineCount);
-    for (i = 0; i < subEngineCount; i++) {
-        futures[i] = std::async(std::launch::async, [this, fn, i]() { fn(substateEngines[i]); });
-    }
-    for (i = 0; i < subEngineCount; i++) {
-        futures[i].get();
-    }
+    par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+        substateEngines[lcv]->SetDevice(dev);
+        fn(substateEngines[lcv]);
+    });
 
     if (highestBit >= subQubitCount) {
         SeparateEngines();
