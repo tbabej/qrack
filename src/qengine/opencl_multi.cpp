@@ -1299,25 +1299,19 @@ void QEngineOCLMulti::RegOp(F fn, OF ofn, bitLenInt length, std::vector<bitLenIn
         }
     }
 
-    std::vector<std::future<void>> futures(subEngineCount);
     if (highestBit < subQubitCount) {
-        for (i = 0; i < subEngineCount; i++) {
-            futures[i] = std::async(std::launch::async, [this, fn, i, length]() { fn(substateEngines[i], length); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            futures[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            fn(substateEngines[lcv], length);
+        });
     } else {
         bitLenInt bitDiff = (highestBit - subQubitCount) + 1;
         int subLength = ((int)length) - ((int)bitDiff);
         if (subLength > 0) {
-            for (i = 0; i < subEngineCount; i++) {
-                futures[i] =
-                    std::async(std::launch::async, [this, fn, i, subLength]() { fn(substateEngines[i], subLength); });
-            }
-            for (i = 0; i < subEngineCount; i++) {
-                futures[i].get();
-            }
+            par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+                substateEngines[lcv]->SetDevice(dev);
+                fn(substateEngines[lcv], subLength);
+            });
         } else {
             subLength = 0;
         }
@@ -1336,15 +1330,11 @@ void QEngineOCLMulti::NormalizeState(real1 nrm)
         return;
     }
 
-    bitLenInt i;
     if (runningNorm != 1.0) {
-        std::vector<std::future<void>> nf(subEngineCount);
-        for (i = 0; i < subEngineCount; i++) {
-            nf[i] = std::async(std::launch::async, [this, i]() { substateEngines[i]->NormalizeState(runningNorm); });
-        }
-        for (i = 0; i < subEngineCount; i++) {
-            nf[i].get();
-        }
+        par_for_device(0, subEngineCount, oclDeviceCount, [&](bitCapInt lcv, int dev) {
+            substateEngines[lcv]->SetDevice(dev);
+            substateEngines[lcv]->NormalizeState(runningNorm);
+        });
     }
     runningNorm = 1.0;
 }
