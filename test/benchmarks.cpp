@@ -31,7 +31,7 @@ using namespace Qrack;
         REQUIRE(__tmp_b > (__tmp_b - EPSILON));                                                                        \
     } while (0);
 
-const bitLenInt MaxQubits = 28;
+const bitLenInt MaxQubits = 20;
 
 void benchmarkLoopVariable(std::function<void(QInterfacePtr, int)> fn, bitLenInt mxQbts)
 {
@@ -101,7 +101,7 @@ TEST_CASE("test_cnot_all")
 {
     benchmarkLoop([](QInterfacePtr qftReg, int n) { qftReg->CNOT(0, n / 2, n / 2); });
 }
-#if 0
+
 TEST_CASE("test_anticnot")
 {
     benchmarkLoop([](QInterfacePtr qftReg, int n) { qftReg->AntiCNOT(0, n / 2, n / 2); });
@@ -121,12 +121,12 @@ TEST_CASE("test_swap")
 {
     benchmarkLoop([](QInterfacePtr qftReg, int n) { qftReg->Swap(0, n / 2, n / 2); });
 }
-#endif
+
 TEST_CASE("test_x_all")
 {
     benchmarkLoop([](QInterfacePtr qftReg, int n) { qftReg->X(0, n); });
 }
-#if 0
+
 TEST_CASE("test_y")
 {
     benchmarkLoop([](QInterfacePtr qftReg, int n) { qftReg->Y(0, n); });
@@ -437,7 +437,7 @@ TEST_CASE("test_swap_reg")
 {
     benchmarkLoop([](QInterfacePtr qftReg, int n) { qftReg->Swap(0, n / 2, n / 2); });
 }
-#endif
+
 TEST_CASE("test_cnot_single")
 {
     benchmarkLoop([](QInterfacePtr qftReg, int n) { qftReg->CNOT(0, 1, 1); });
@@ -480,5 +480,5 @@ TEST_CASE("test_grover")
 
             qftReg->MReg(0, n);
         },
-        16);
+        8);
 }
